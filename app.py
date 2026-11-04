@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from dotenv import load_dotenv
 
+from research_assistant import (
+    delete_library_document,
+    generate_gemini_answer,
+    index_pdf_bytes,
+    list_library_documents,
+    make_quant_context,
+    retrieve_relevant_chunks,
+)
 from quant_engine import (
     DEFAULT_WEIGHTS,
     add_composite_score,
@@ -15,6 +25,8 @@ from quant_engine import (
     load_uploaded_csvs,
     make_demo_prices,
 )
+
+load_dotenv(override=False)
 
 st.set_page_config(
     page_title="Quantitative Stock Decision Assistant",
@@ -44,6 +56,163 @@ def fmt_pct(value):
 
 def fmt_num(value, digits=2):
     return "—" if pd.isna(value) else f"{value:.{digits}f}"
+
+
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def render_research_library() -> None:
+    """Upload, index, list, and delete local quantitative-finance PDFs."""
+    st.subheader("Research paper library")
+    st.write(
+        "Upload academic papers and reports. The app extracts selectable PDF text, "
+        "splits it into page-labelled passages, and builds a local TF-IDF search index. "
+        "Files and the index stay in this project's data/ folder."
+    )
+    uploaded_pdfs = st.file_uploader(
+        "Upload research papers (PDF)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="research_pdf_uploader",
+        help="Maximum 25 MB per PDF. Scanned/image-only PDFs are not OCR-processed in this version.",
+    )
+    if st.button("Upload and index PDFs", type="primary", disabled=not uploaded_pdfs,
+                 key="index_research_pdfs"):
+        results = []
+        progress = st.progress(0)
+        for number, uploaded in enumerate(uploaded_pdfs, start=1):
+            try:
+                result = index_pdf_bytes(uploaded.name, uploaded.getvalue())
+                results.append(result)
+            except Exception as exc:
+                st.error(f"{uploaded.name}: {exc}")
+            progress.progress(number / len(uploaded_pdfs))
+        for result in results:
+            if result["status"] == "indexed":
+                st.success(
+                    f"Indexed {result['filename']} — {result['pages']} pages, "
+                    f"{result['chunks']} searchable passages."
+                )
+            else:
+                st.info(f"Already in library: {result['filename']}")
+
+    documents = list_library_documents()
+    st.markdown("### Documents currently indexed")
+    if not documents:
+        st.info("No research papers uploaded yet. Add your group's quantitative-finance PDFs above.")
+    else:
+        summary = pd.DataFrame([
+            {
+                "Document": d["filename"],
+                "File size": _format_bytes(d["size_bytes"]),
+                "PDF pages": d["pages"],
+                "Pages with text": d["pages_with_text"],
+                "Searchable passages": d["chunks"],
+                "Status": "Indexed",
+            }
+            for d in documents
+        ])
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+        for document in documents:
+            left, right = st.columns([5, 1])
+            left.caption(f"{document['filename']} · SHA-256 {document['sha256'][:12]}…")
+            if right.button("Delete", key=f"delete_paper_{document['sha256']}"):
+                if delete_library_document(document["sha256"]):
+                    st.success(f"Deleted {document['filename']} from the local library.")
+                    st.rerun()
+                else:
+                    st.error(f"Could not delete {document['filename']}.")
+    st.caption(
+        "Privacy note: the original PDFs and local search index are stored on this computer. "
+        "When you ask Gemini a question, only the relevant retrieved passages are sent to the Gemini API."
+    )
+
+
+def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
+    """Render LLM chat grounded in quantitative metrics and local paper excerpts."""
+    st.subheader("AI quantitative-finance research assistant")
+    st.write(
+        "Gemini explains the app's calculated metrics and can consult relevant passages "
+        "from your uploaded papers. Python remains responsible for the numerical scores; "
+        "the LLM does not calculate or alter the ranking."
+    )
+    if is_demo:
+        st.warning("The current stock universe uses synthetic demo prices. Do not ask the AI to assess these as real securities.")
+
+    env_key = os.getenv("GEMINI_API_KEY", "").strip()
+    default_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+    with st.expander("Gemini connection settings", expanded=not bool(env_key)):
+        if env_key:
+            st.success("GEMINI_API_KEY was found in your .env / environment.")
+        else:
+            st.info("Add GEMINI_API_KEY to a local .env file, or enter it below for this session only.")
+        typed_key = st.text_input(
+            "Gemini API key", value="", type="password", key="gemini_api_key_session",
+            placeholder="Paste your API key (kept only in this Streamlit session)",
+        )
+        model_name = st.text_input("Gemini model", value=default_model, key="gemini_model_name")
+        api_key = typed_key.strip() or env_key
+        st.caption("Get an API key from Google AI Studio. Never commit your API key or .env file to GitHub.")
+
+    if "ai_research_messages" not in st.session_state:
+        st.session_state["ai_research_messages"] = []
+
+    for message in st.session_state["ai_research_messages"]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message.get("sources"):
+                with st.expander("Research passages retrieved"):
+                    for source in message["sources"]:
+                        st.markdown(
+                            f"- **{source['source']}**, page {source['page']} "
+                            f"(retrieval similarity: {source['similarity']:.2f})"
+                        )
+
+    question = st.chat_input("Ask about the stock ranking, risk metrics, strategy, or uploaded papers…", key="quant_ai_chat_input")
+    if question:
+        st.session_state["ai_research_messages"].append({"role": "user", "content": question})
+        if not api_key:
+            answer = "Please configure a Gemini API key in the settings above. You can create one in Google AI Studio."
+            st.session_state["ai_research_messages"].append({"role": "assistant", "content": answer})
+            st.rerun()
+        with st.spinner("Retrieving research passages and asking Gemini to analyse the evidence…"):
+            try:
+                retrieved = retrieve_relevant_chunks(question, top_k=5)
+                previous = st.session_state["ai_research_messages"][:-1]
+                answer = generate_gemini_answer(
+                    api_key=api_key,
+                    model=model_name,
+                    question=question,
+                    quant_context=quant_context,
+                    retrieved_chunks=retrieved,
+                    conversation=previous,
+                )
+                sources = [
+                    {"source": item.get("source", "Unknown"),
+                     "page": item.get("page", "?"),
+                     "similarity": item.get("similarity", 0.0)}
+                    for item in retrieved
+                ]
+                st.session_state["ai_research_messages"].append(
+                    {"role": "assistant", "content": answer, "sources": sources}
+                )
+            except Exception as exc:
+                st.session_state["ai_research_messages"].append(
+                    {"role": "assistant", "content": f"I couldn't complete the Gemini request. {exc}"}
+                )
+        st.rerun()
+
+    col1, col2 = st.columns([1, 5])
+    if col1.button("Clear chat", key="clear_ai_research_chat"):
+        st.session_state["ai_research_messages"] = []
+        st.rerun()
+    col2.caption("Suggested question: Compare the two highest-ranked stocks and explain the risk/return trade-offs using the quantitative results and research papers.")
 
 
 st.markdown("""
@@ -104,9 +273,14 @@ else:
             st.sidebar.error(str(exc))
 
 if prices is None:
-    st.info("Choose **Demo dataset** to explore the dashboard immediately, or choose **Yahoo Finance** / **Upload CSV** to analyse real historical prices.")
+    st.info("Choose **Demo dataset** to explore the dashboard immediately, or choose **Yahoo Finance** / **Upload CSV** to analyse historical prices.")
     st.markdown("### How to start")
-    st.markdown("1. Select **Demo dataset** in the sidebar to explore the app.\n2. Switch to **Yahoo Finance** and load ticker symbols for market data, or upload your own CSV files.\n3. Review the peer-relative score and inspect the individual risk and return factors.\n4. Use the Backtest tab to test a simple momentum strategy against an equal-weight benchmark.")
+    st.markdown("1. Select **Demo dataset** to explore the app.\n2. Switch to **Yahoo Finance** and load ticker symbols, or upload your own CSV files.\n3. Review the peer-relative score and inspect the individual risk and return factors.\n4. Use Backtesting to test a simple momentum strategy against an equal-weight benchmark.")
+    ai_tab, library_tab = st.tabs(["🤖 AI research assistant", "📚 Research paper library"])
+    with ai_tab:
+        render_ai_assistant("No stock-price data is currently loaded. Analyse the user's question using uploaded research excerpts only, and clearly state that no live quantitative metrics are available.", False)
+    with library_tab:
+        render_research_library()
     st.stop()
 
 if data_mode != "Yahoo Finance":
@@ -131,8 +305,8 @@ if fetch_errors:
         for err in fetch_errors:
             st.write(f"- {err}")
 
-screen_tab, detail_tab, backtest_tab, method_tab = st.tabs(
-    ["🏆 Stock screener", "📊 Stock analysis", "🧪 Backtesting", "📘 Methodology"]
+screen_tab, detail_tab, backtest_tab, ai_tab, library_tab, method_tab = st.tabs(
+    ["🏆 Stock screener", "📊 Stock analysis", "🧪 Backtesting", "🤖 AI assistant", "📚 Research library", "📘 Methodology"]
 )
 
 with screen_tab:
@@ -239,6 +413,20 @@ with backtest_tab:
         st.warning(f"Backtest unavailable: {exc}")
         st.caption("Try a longer price-history period or upload more historical observations. At least eight month-end observations are required for the default six-month lookback.")
 
+with ai_tab:
+    quant_context = make_quant_context(
+        scores=scores,
+        source_note=source_note,
+        start_date=start_date,
+        end_date=end_date,
+        risk_free_rate=risk_free_rate,
+        is_demo=(data_mode == "Demo dataset"),
+    )
+    render_ai_assistant(quant_context, is_demo=(data_mode == "Demo dataset"))
+
+with library_tab:
+    render_research_library()
+
 with method_tab:
     st.subheader("How the score is calculated")
     st.write("The first prototype uses a transparent, rule-based, cross-sectional score. Each factor is converted to a percentile within the stocks selected by the user. The weighted average is therefore relative to the selected comparison group and time period.")
@@ -261,6 +449,14 @@ with method_tab:
 - The scoring weights are initial educational design choices, not proven optimal parameters.
 - This first version focuses on price-based factors; it does not yet include valuation, financial statements, earnings quality, or company fundamentals.
 - Yahoo Finance data accessed via yfinance may be delayed, incomplete, or unavailable. Check data dates and source terms before relying on it.
+
+**How the LLM integration works**
+
+- The quantitative engine calculates all numerical indicators, factor percentiles, composite scores, and backtest results in Python.
+- PDF papers are stored locally, parsed into page-labelled text chunks, and indexed with TF-IDF. Retrieval is local and does not require an embedding API.
+- When a user asks a question, the app retrieves up to five relevant paper passages and sends those passages, the user's question, recent chat context, and a compact summary of the currently displayed stock metrics to the Gemini API using the official Google Gen AI Python SDK.
+- Gemini explains the supplied figures and research excerpts. It does not fetch prices, recalculate the score, or change the ranking.
+- The API key is read from a local `.env` file or entered for the current session. Do not commit API keys or `.env` to GitHub.
 
 **Backtest assumptions**
 

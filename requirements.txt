@@ -3,3 +3,7 @@ pandas>=2.1,<4.0
 numpy>=1.26,<3.0
 yfinance>=0.2.50,<2.0
 plotly>=5.20,<7.0
+pypdf>=5.0,<7.0
+scikit-learn>=1.5,<2.0
+google-genai>=1.0.0
+python-dotenv>=1.0,<2.0

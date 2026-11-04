@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.streamlit/secrets.toml
+.env
+.DS_Store
+# Keep original PDFs and locally generated search indexes out of public GitHub.
+data/papers/
+data/index/
+*.pdf

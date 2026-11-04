@@ -1,132 +1,157 @@
-# Quantitative Stock Decision Assistant
+# Quantitative Stock Decision Assistant — LLM + Research Papers
 
-A standalone Streamlit application for comparing stocks using transparent, historical quantitative-finance indicators. It includes a peer-relative score, price charts, CSV import, and a lagged monthly momentum backtest.
+A Streamlit-based quantitative-finance decision-support prototype. Python calculates the stock metrics and rankings; a Gemini LLM explains the calculated results and can use passages retrieved from the group's uploaded research papers.
 
-> **Educational use only.** The platform is a research and comparison tool, not personalised financial advice, a guaranteed forecast, or an automatic buy/sell system. A higher score is relative to the selected peer group and historical period.
+> **Educational research tool only.** It is not personalised financial advice, a guaranteed forecast, or an automatic buy/sell system. A higher relative score is not proof that a stock is undervalued or will outperform.
 
-## Features
+## What changed in this version
 
-- **Stock screener:** compare a list of ticker symbols using six-month momentum, Sharpe ratio, price trend, annualised volatility, and maximum drawdown.
-- **Transparent score:** the initial score weights are Momentum 30%, Sharpe 25%, Price trend 20%, Low volatility 15%, and Drawdown control 10%. Factors are converted into peer-relative percentiles before weighting.
-- **Individual analysis:** view historical adjusted prices with 50- and 200-day moving averages.
-- **Backtesting:** evaluate a monthly, cross-sectional six-month momentum strategy against an equal-weight benchmark. The signal is lagged and estimated transaction costs are deducted.
-- **CSV import:** use your own historical price data if live data is unavailable.
-- **Offline demo:** explore the interface with synthetic data. Demo prices are clearly marked and must never be interpreted as real market data.
-- **Exports:** download rankings, price history, and backtest results as CSV.
+### Deterministic quantitative engine
 
-## Requirements
+The existing `quant_engine.py` remains responsible for price data, returns, six-month momentum, Sharpe ratio, moving-average trend, annualised volatility, maximum drawdown, peer-relative factor scores, and the lagged monthly momentum backtest. The LLM does not alter or calculate these values.
 
-- macOS, Windows, or Linux
-- Python 3.10 or newer (Python 3.11 or 3.12 recommended)
-- Internet connection for Yahoo Finance data; not required for demo data or CSV imports
+### Gemini LLM connection
 
-## Setup in VS Code
+The AI Assistant tab calls Google's Gemini API through the official `google-genai` Python SDK. The request includes:
 
-1. Download and unzip this project.
-2. In VS Code, choose **File → Open Folder** and open `quantitative_stock_decision_assistant`.
-3. Open **Terminal → New Terminal**. Confirm the terminal is in this project directory by running `pwd` and `ls`. You should see `app.py`, `quant_engine.py`, and `requirements.txt`.
-4. Create and activate a virtual environment:
+1. The user's question.
+2. A compact, current summary of the metrics produced by the Python quantitative engine.
+3. Up to six recent conversation messages.
+4. Up to five relevant paper passages retrieved locally from the Research Library.
+
+Gemini is used to explain and contextualise results. It does not fetch market prices, execute trades, or change stock rankings. The default model is `gemini-3.8-flash`; change `GEMINI_MODEL` if a different model is enabled for your API key.
+
+### Local PDF knowledge base (RAG)
+
+- Upload PDF papers through the Research Library tab.
+- The app extracts selectable text using `pypdf` and preserves page numbers.
+- Text is divided into overlapping passages and saved as JSON metadata/index files under `data/index/`.
+- Original PDFs are stored under `data/papers/`.
+- At query time, `scikit-learn` TF-IDF and cosine similarity retrieve relevant passages locally.
+- The app sends only the selected passages to Gemini for answer generation and displays the retrieved source filenames and pages.
+
+The first version does not include OCR, so scanned/image-only PDFs without selectable text cannot be indexed. It also does not use vector embeddings; TF-IDF is a lightweight lexical retrieval baseline suitable for a small class project.
+
+## Setup in VS Code (macOS)
+
+1. Extract the ZIP and open the `quantitative_stock_decision_assistant_llm` folder in VS Code.
+2. Open **Terminal → New Terminal**. Run `pwd` and `ls`; you should see `app.py`, `quant_engine.py`, and `requirements.txt`.
+3. Create and activate a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-On Windows PowerShell, activate with:
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-5. Install dependencies:
+4. Install dependencies:
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-6. Start the app:
+5. Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey).
+6. Copy `.env.example` to `.env` and add your API key:
+
+```bash
+cp .env.example .env
+```
+
+Then open `.env` in VS Code and replace the placeholder:
+
+```text
+GEMINI_API_KEY=your_real_key_here
+GEMINI_MODEL=gemini-3.8-flash
+```
+
+7. Start the app:
 
 ```bash
 python -m streamlit run app.py
 ```
 
-7. Streamlit will print a local URL (normally `http://localhost:8501`) and may open it in your browser.
+Streamlit normally opens `http://localhost:8501`.
 
-To stop the app, click the terminal running Streamlit and press `Ctrl+C`.
+Alternatively, you can enter the Gemini API key in the AI Assistant tab for the current app session only. The key is never displayed in chat messages.
 
-## How to use
+## Suggested first use
 
-### Option A — Demo data
+1. Start with **Demo dataset** to explore the dashboard. The prices are synthetic and must not be treated as live equities data.
+2. Open **Research paper library** and upload the group's PDFs, for example:
+   - `Deep Learning in the Stock Market: A Systematic Survey of Practice, Backtesting, and Applications`.
+   - `Empirical Asset Pricing via Machine Learning: Evidence from the European Stock Market`.
+   - `The Probability of Backtest Overfitting`.
+3. Confirm that each PDF shows an indexed status, page count, and passage count.
+4. Configure the Gemini API key in `.env` or the AI Assistant settings.
+5. Open **AI assistant** and ask questions such as:
+   - "Explain the difference between momentum and Sharpe ratio in this ranking."
+   - "What are the limitations of backtesting a momentum strategy? Use the research papers."
+   - "Compare the leading stocks in the current table, using their quantitative metrics."
+6. For real-stock research, select **Yahoo Finance**, load a ticker universe, and check the displayed data period and source before asking the AI to interpret it.
 
-Select **Demo dataset** in the left sidebar. The app generates synthetic, reproducible prices so the dashboard can be explored without internet access. The app marks this data as synthetic.
+## How the communication with the LLM works
 
-### Option B — Yahoo Finance
-
-1. Select **Yahoo Finance** in the sidebar.
-2. Enter ticker symbols separated by commas, for example `AAPL, MSFT, NVDA, AMZN, GOOGL, META`.
-3. Select a historical period and annual risk-free-rate assumption.
-4. Click **Load / refresh market data**.
-
-The app retrieves auto-adjusted daily closing prices through `yfinance`. yfinance is an open-source interface to Yahoo Finance's publicly available APIs and is intended for research/educational and personal use. It is not affiliated with or endorsed by Yahoo. Review the data provider's current terms and limitations before using data beyond personal research. Data may be incomplete, delayed, or unavailable.
-
-### Option C — Upload CSV files
-
-Upload one or more CSV files. Supported formats:
-
-**One file per ticker** (ticker is taken from the filename):
-
-```csv
-Date,Close
-2024-01-02,100.25
-2024-01-03,101.10
+```text
+User question
+      |
+      +------------------------------+
+      |                              |
+      v                              v
+Python quantitative engine     Local PDF library
+(stock metrics and scores)     (PDF -> page chunks -> TF-IDF retrieval)
+      |                              |
+      +---------------+--------------+
+                      |
+                      v
+             Context sent to Gemini API
+             (question + metrics + retrieved passages)
+                      |
+                      v
+              Gemini generated explanation
+                      |
+                      v
+             Answer shown in Streamlit
+             with retrieved PDF/page sources
 ```
 
-`Adj Close` is also accepted and takes precedence over `Close` if both exist.
+## Privacy and GitHub
 
-**One combined wide file:**
+- Original PDFs and local indexes remain inside `data/` on the computer running the app.
+- When using Gemini, the user question, current metric summary, and selected relevant PDF passages are sent to Google's Gemini API. The entire PDF library is not sent as a single upload by this app.
+- Internet access and a valid Gemini API key are required for LLM responses. Screener calculations, PDF storage, and TF-IDF retrieval work locally.
+- `.env`, API keys, original PDFs, and local indexes are excluded by `.gitignore`. Do not commit secrets or research PDFs to a public repository.
+- Review Google's current Gemini API terms and your institution's data rules before uploading confidential material.
 
-```csv
-Date,AAPL,MSFT,NVDA
-2024-01-02,185.64,370.87,48.17
-2024-01-03,184.25,373.25,49.48
+## Tests
+
+Run lightweight local tests (no Gemini API key required):
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
-Use adjusted closing prices if your data provider supplies them. Prices should be daily, positive, and consistently denominated. The app does not independently adjust uploaded data for dividends or splits.
+The tests cover the text chunking and local retrieval logic. The Gemini request itself requires a valid API key and an internet connection, so it is not called during tests.
 
-## Score methodology
+## Known limitations
 
-For each stock, the application calculates:
-
-- **Period return:** last price divided by first price in the selected data, minus one.
-- **6-month momentum:** latest adjusted price divided by the price 126 trading observations earlier, minus one.
-- **Sharpe ratio:** (mean daily return × 252 − annual risk-free rate) / (standard deviation of daily returns × √252).
-- **Price trend:** 50 points for price above the 50-day average and 50 points for price above the 200-day average, using whichever averages are available.
-- **Annualised volatility:** daily return standard deviation × √252.
-- **Maximum drawdown:** minimum of price divided by its running maximum, minus one.
-
-Each factor is converted to a percentile within the selected stock universe. The weighted score is thus **relative**, not an absolute probability of future gains. If a factor is missing for a stock, available weights are re-scaled for that stock. Scores and ranks can change when the selected peer group changes.
-
-The weights are initial project assumptions, not empirically proven optimal values. Test alternative weights and periods as part of the research project.
-
-## Backtest methodology and limitations
-
-The backtest resamples prices to month-end observations. At each month, it uses the six-month momentum signal from the prior month-end to select the top N stocks for the following month. The selected stocks are equally weighted. A simple transaction-cost estimate is deducted using one-way portfolio turnover and the entered cost in basis points. The benchmark is an equal-weight portfolio of the same selected stock universe.
-
-This is a simplified educational backtest. It does not currently model taxes, market impact, detailed slippage, delisted stocks, survivorship bias in the user's chosen universe, liquidity constraints, or corporate-action issues in arbitrary CSV uploads. It does not guarantee future performance. Avoid tuning a strategy repeatedly on the same test period; use a separate out-of-sample period.
+- TF-IDF retrieval is lexical, not semantic embedding retrieval; it may miss relevant passages expressed with different vocabulary.
+- Scanned PDFs require OCR, which is not included.
+- Yahoo Finance data may be unavailable, delayed, or subject to provider terms.
+- The score weights are initial educational assumptions. They have not been proven optimal through out-of-sample research.
+- The backtest is simplified and does not fully model taxes, market impact, liquidity, delisted securities, or survivorship bias.
+- The system is a research aid, not a stock-picking oracle. Check the data, assumptions, and evidence yourself.
 
 ## Project structure
 
 ```text
-quantitative_stock_decision_assistant/
-├── app.py             # Streamlit interface
-├── quant_engine.py    # Data loading, indicators, scoring and backtesting
-├── requirements.txt   # Python dependencies
-├── README.md          # Setup and methodology
+quantitative_stock_decision_assistant_llm/
+├── app.py
+├── quant_engine.py
+├── research_assistant.py
+├── requirements.txt
+├── .env.example
+├── .gitignore
+├── README.md
 └── tests/
-    └── test_quant_engine.py
+    └── test_research_assistant.py
 ```
-
-## GitHub safety
-
-Do not commit API keys, passwords, `.env` files, private datasets, or personal account information. This version does not require an API key. Check data provider terms before redistributing market data.
