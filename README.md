@@ -1,6 +1,6 @@
 # Quantitative Stock Decision Assistant — LLM + Research Papers
 
-A Streamlit-based quantitative-finance decision-support prototype. Python calculates the stock metrics and rankings; a Gemini LLM explains the calculated results and can use passages retrieved from the group's uploaded research papers.
+A Streamlit-based quantitative-finance decision-support prototype. Python calculates the stock metrics and rankings; a **local AI model running on your own computer** (via Ollama or LM Studio) explains the calculated results and can use passages retrieved from the group's uploaded research papers. Gemini is kept only as an optional cloud alternative.
 
 > **Educational research tool only.** It is not personalised financial advice, a guaranteed forecast, or an automatic buy/sell system. A higher relative score is not proof that a stock is undervalued or will outperform.
 
@@ -10,16 +10,20 @@ A Streamlit-based quantitative-finance decision-support prototype. Python calcul
 
 The existing `quant_engine.py` remains responsible for price data, returns, six-month momentum, Sharpe ratio, moving-average trend, annualised volatility, maximum drawdown, peer-relative factor scores, and the lagged monthly momentum backtest. The LLM does not alter or calculate these values.
 
-### Gemini LLM connection
+### Local AI connection (default)
 
-The AI Assistant tab calls Google's Gemini API through the official `google-genai` Python SDK. The request includes:
+The AI Assistant tab talks to a **local language model** through the OpenAI-compatible HTTP API that Ollama, LM Studio and llama.cpp's server all provide. No cloud account, API key, or internet connection is needed for the explanation step. The request includes:
 
 1. The user's question.
 2. A compact, current summary of the metrics produced by the Python quantitative engine.
-3. Up to six recent conversation messages.
-4. Up to five relevant paper passages retrieved locally from the Research Library.
+3. Up to six recent conversation messages (shortened for small models).
+4. Up to five relevant paper passages retrieved locally from the Research Library (shortened to fit small context windows).
 
-Gemini is used to explain and contextualise results. It does not fetch market prices, execute trades, or change stock rankings. The default model is `gemini-3.8-flash`; change `GEMINI_MODEL` if a different model is enabled for your API key.
+The local model explains and contextualises results. It does not fetch market prices, execute trades, or change stock rankings. The default is `llama3.2` on Ollama (`http://localhost:11434/v1`); change `LOCAL_LLM_MODEL` / `LOCAL_LLM_BASE_URL` in `.env` or in the AI settings panel. The panel has a **Test connection** button that lists the installed models and tells you what to run if the server or model is missing. If the address you enter is not on your own computer, the app warns you that your data would leave it.
+
+### Optional: Gemini (cloud)
+
+Choose *Gemini (optional cloud API)* in the AI provider selector (or set `LLM_PROVIDER=gemini`). This needs `python -m pip install -r requirements-gemini.txt`, a `GEMINI_API_KEY`, and sends the question, metric summary and selected passages to Google. The default model name is `gemini-3.8-flash`; change `GEMINI_MODEL` if needed.
 
 ### Local PDF knowledge base (RAG)
 
@@ -28,7 +32,7 @@ Gemini is used to explain and contextualise results. It does not fetch market pr
 - Text is divided into overlapping passages and saved as JSON metadata/index files under `data/index/`.
 - Original PDFs are stored under `data/papers/`.
 - At query time, `scikit-learn` TF-IDF and cosine similarity retrieve relevant passages locally.
-- The app sends only the selected passages to Gemini for answer generation and displays the retrieved source filenames and pages.
+- The app passes only the selected passages to the language model and displays the retrieved source filenames and pages.
 
 The first version does not include OCR, so scanned/image-only PDFs without selectable text cannot be indexed. It also does not use vector embeddings; TF-IDF is a lightweight lexical retrieval baseline suitable for a small class project.
 
@@ -50,18 +54,18 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-5. Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/app/apikey).
-6. Copy `.env.example` to `.env` and add your API key:
+5. Install a local AI runtime. The easiest is [Ollama](https://ollama.com): install it, then in a second terminal run:
+
+```bash
+ollama pull llama3.2
+ollama serve        # skip if the Ollama app is already running
+```
+
+   Any other OpenAI-compatible local server also works (for example LM Studio at `http://localhost:1234/v1`). Larger models answer better; `llama3.2` (3B) is a small default that fits on a laptop.
+6. Copy `.env.example` to `.env` (the defaults already point at Ollama):
 
 ```bash
 cp .env.example .env
-```
-
-Then open `.env` in VS Code and replace the placeholder:
-
-```text
-GEMINI_API_KEY=your_real_key_here
-GEMINI_MODEL=gemini-3.8-flash
 ```
 
 7. Start the app:
@@ -72,7 +76,7 @@ python -m streamlit run app.py
 
 Streamlit normally opens `http://localhost:8501`.
 
-Alternatively, you can enter the Gemini API key in the AI Assistant tab for the current app session only. The key is never displayed in chat messages.
+You can also change the local server address and model name in the AI Assistant tab. (If you prefer Gemini, enter an API key there for the current session only; it is never displayed in chat messages.)
 
 ## Suggested first use
 
@@ -82,7 +86,7 @@ Alternatively, you can enter the Gemini API key in the AI Assistant tab for the 
    - `Empirical Asset Pricing via Machine Learning: Evidence from the European Stock Market`.
    - `The Probability of Backtest Overfitting`.
 3. Confirm that each PDF shows an indexed status, page count, and passage count.
-4. Configure the Gemini API key in `.env` or the AI Assistant settings.
+4. Make sure Ollama is running with a model pulled, then use **Test connection** in the AI Assistant settings.
 5. Open **AI assistant** and ask questions such as:
    - "Explain the difference between momentum and Sharpe ratio in this ranking."
    - "What are the limitations of backtesting a momentum strategy? Use the research papers."
@@ -103,11 +107,11 @@ Python quantitative engine     Local PDF library
       +---------------+--------------+
                       |
                       v
-             Context sent to Gemini API
-             (question + metrics + retrieved passages)
+        Context sent to the LOCAL model
+     (question + metrics + retrieved passages)
                       |
                       v
-              Gemini generated explanation
+        Local LLM (Ollama / LM Studio) explanation
                       |
                       v
              Answer shown in Streamlit
@@ -117,22 +121,24 @@ Python quantitative engine     Local PDF library
 ## Privacy and GitHub
 
 - Original PDFs and local indexes remain inside `data/` on the computer running the app.
-- When using Gemini, the user question, current metric summary, and selected relevant PDF passages are sent to Google's Gemini API. The entire PDF library is not sent as a single upload by this app.
-- Internet access and a valid Gemini API key are required for LLM responses. Screener calculations, PDF storage, and TF-IDF retrieval work locally.
+- With the default local provider, the question, metric summary and selected PDF passages stay on your computer. Only fetching Yahoo Finance prices uses the internet, and the demo and CSV data sources work fully offline.
+- If you opt into Gemini, the question, current metric summary, and selected relevant PDF passages are sent to Google's Gemini API (never the entire PDF library).
 - `.env`, API keys, original PDFs, and local indexes are excluded by `.gitignore`. Do not commit secrets or research PDFs to a public repository.
-- Review Google's current Gemini API terms and your institution's data rules before uploading confidential material.
+- If you use the optional Gemini provider, review Google's current Gemini API terms and your institution's data rules before uploading confidential material.
 
 ## Tests
 
-Run lightweight local tests (no Gemini API key required):
+Run the tests (no API key, internet connection or local model required):
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The tests cover the text chunking and local retrieval logic. The Gemini request itself requires a valid API key and an internet connection, so it is not called during tests.
+The tests cover text chunking, local retrieval, and the local-AI client (answer parsing, hidden-reasoning removal, model listing, and helpful errors when the server or model is missing). The local-AI client is tested against a small mock of the OpenAI-compatible API; a real model is only used when you run the app. The Gemini request is not called during tests.
 
 ## Known limitations
+
+- Answer quality depends on the local model. Small models (3B parameters) can miss details or ignore the citation format; use a larger model if your computer allows it. Local models also have small context windows, which is why the app shortens passages for them.
 
 - TF-IDF retrieval is lexical, not semantic embedding retrieval; it may miss relevant passages expressed with different vocabulary.
 - Scanned PDFs require OCR, which is not included.
@@ -149,6 +155,7 @@ quantitative_stock_decision_assistant_llm/
 ├── quant_engine.py
 ├── research_assistant.py
 ├── requirements.txt
+├── requirements-gemini.txt   (optional cloud provider)
 ├── .env.example
 ├── .gitignore
 ├── README.md

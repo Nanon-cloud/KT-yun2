@@ -1,8 +1,9 @@
-"""Local PDF knowledge retrieval and Gemini LLM explanation layer.
+"""Local PDF knowledge retrieval and LLM explanation layer.
 
-PDFs and the TF-IDF index remain on disk in ./data. Only the question, selected
-quantitative metrics, and a small set of retrieved text excerpts are sent to
-Gemini when the user asks for an AI explanation.
+PDFs and the TF-IDF index remain on disk in ./data. By default the explanation is
+written by a LOCAL language model (Ollama, LM Studio, llama.cpp server or any
+OpenAI-compatible local endpoint), so nothing leaves the computer. Gemini remains
+available as an optional cloud backend.
 """
 from __future__ import annotations
 
@@ -10,6 +11,9 @@ import hashlib
 import json
 import re
 import unicodedata
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -254,49 +258,57 @@ def make_quant_context(scores, source_note: str, start_date, end_date,
     return "\n".join(context)
 
 
-def generate_gemini_answer(api_key: str, model: str, question: str,
-                           quant_context: str,
-                           retrieved_chunks: list[dict],
-                           conversation: list[dict] | None = None) -> str:
-    """Call Gemini with quantitative metrics and locally retrieved paper excerpts."""
-    if not api_key or not api_key.strip():
-        raise ValueError("Enter your Gemini API key in the AI Assistant settings first.")
-    if not question or not question.strip():
-        raise ValueError("Enter a question first.")
+DEFAULT_LOCAL_BASE_URL = "http://localhost:11434/v1"  # Ollama's OpenAI-compatible endpoint
+DEFAULT_LOCAL_MODEL = "llama3.2"
+# Small local models have small context windows (often 4k tokens), so the local
+# prompt is kept compact: shorter passages, shorter history, shorter answers.
+LOCAL_MAX_CHUNK_CHARS = 1100
+LOCAL_MAX_HISTORY_CHARS = 500
+LOCAL_MAX_OUTPUT_TOKENS = 900
 
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError as exc:
-        raise RuntimeError("Gemini SDK is missing. Run: python -m pip install -r requirements.txt") from exc
+SYSTEM_INSTRUCTION = (
+    "You are a cautious quantitative-finance research assistant. You explain calculations and research, "
+    "not provide personalized financial advice. Never claim that a score guarantees returns or that a stock "
+    "is certain to rise. Do not invent market data, calculations, facts, or paper citations. Distinguish "
+    "quantitative metrics computed by the application from claims in retrieved research excerpts and from "
+    "your own general explanation. If the data is synthetic, clearly say so. If context is insufficient, "
+    "state what is missing. Discuss limitations such as overfitting, transaction costs, survivorship bias, "
+    "look-ahead bias, data quality, and the fact that historical performance does not guarantee future results. "
+    "When using a retrieved passage, cite it inline as [Document filename, p. X]. Do not create a citation "
+    "unless that source appears in the supplied excerpts."
+)
 
+
+def build_prompt(question: str, quant_context: str, retrieved_chunks: list[dict],
+                 conversation: list[dict] | None = None, *,
+                 max_chunk_chars: int | None = None,
+                 max_history_chars: int | None = None) -> str:
+    """Assemble the user prompt shared by every LLM backend (local or cloud)."""
     if retrieved_chunks:
-        paper_context = "\n\n".join(
-            f"[SOURCE: {c.get('source', 'Unknown document')} | PAGE: {c.get('page', '?')} | RETRIEVAL SCORE: {c.get('similarity', 0):.3f}]\n{c['text']}"
-            for c in retrieved_chunks
-        )
+        parts = []
+        for c in retrieved_chunks:
+            text = str(c.get("text", ""))
+            if max_chunk_chars and len(text) > max_chunk_chars:
+                text = text[:max_chunk_chars].rstrip() + " …"
+            parts.append(
+                f"[SOURCE: {c.get('source', 'Unknown document')} | PAGE: {c.get('page', '?')} | "
+                f"RETRIEVAL SCORE: {c.get('similarity', 0):.3f}]\n{text}"
+            )
+        paper_context = "\n\n".join(parts)
     else:
-        paper_context = "No relevant excerpts were retrieved from the uploaded research-paper library. Do not claim to have consulted any paper."
+        paper_context = ("No relevant excerpts were retrieved from the uploaded research-paper library. "
+                         "Do not claim to have consulted any paper.")
 
     recent_history = []
     for item in (conversation or [])[-6:]:
         role = "User" if item.get("role") == "user" else "Assistant"
-        recent_history.append(f"{role}: {item.get('content', '')}")
+        content = str(item.get("content", ""))
+        if max_history_chars and len(content) > max_history_chars:
+            content = content[:max_history_chars].rstrip() + " …"
+        recent_history.append(f"{role}: {content}")
     history_text = "\n".join(recent_history) if recent_history else "No prior conversation."
 
-    system_instruction = (
-        "You are a cautious quantitative-finance research assistant. You explain calculations and research, "
-        "not provide personalized financial advice. Never claim that a score guarantees returns or that a stock "
-        "is certain to rise. Do not invent market data, calculations, facts, or paper citations. Distinguish "
-        "quantitative metrics computed by the application from claims in retrieved research excerpts and from "
-        "your own general explanation. If the data is synthetic, clearly say so. If context is insufficient, "
-        "state what is missing. Discuss limitations such as overfitting, transaction costs, survivorship bias, "
-        "look-ahead bias, data quality, and the fact that historical performance does not guarantee future results. "
-        "When using a retrieved passage, cite it inline as [Document filename, p. X]. Do not create a citation "
-        "unless that source appears in the supplied excerpts."
-    )
-
-    prompt = f"""Answer the user's question using the evidence below.
+    return f"""Answer the user's question using the evidence below.
 
 CURRENT QUANTITATIVE APPLICATION RESULTS:
 {quant_context}
@@ -318,13 +330,150 @@ Suggested response structure where appropriate:
 
 If the selected universe uses demo data, do not make claims about real stocks. Do not issue an unconditional buy/sell instruction."""
 
+
+# ---------------------------------------------------------------------------
+# Local LLM backend (Ollama / LM Studio / llama.cpp / any OpenAI-compatible API)
+# ---------------------------------------------------------------------------
+
+def normalise_local_base_url(base_url: str | None) -> str:
+    """Return an OpenAI-compatible base URL ending in /v1 (no trailing slash)."""
+    url = (base_url or DEFAULT_LOCAL_BASE_URL).strip().rstrip("/")
+    if not re.match(r"^https?://", url, flags=re.I):
+        url = "http://" + url
+    if not url.lower().endswith("/v1"):
+        url += "/v1"
+    return url
+
+
+def is_local_url(base_url: str | None) -> bool:
+    """True when the endpoint is on this computer, so prompts never leave the machine."""
+    host = (urlparse(normalise_local_base_url(base_url)).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", flags=re.S | re.I)
+
+
+def clean_model_output(text: str) -> str:
+    """Remove hidden reasoning blocks that some local models (Qwen, DeepSeek-R1) emit."""
+    text = _THINK_BLOCK.sub("", text or "")
+    text = re.sub(r"^.*?</think>", "", text, flags=re.S | re.I)  # unbalanced closing tag
+    return text.strip()
+
+
+def _local_request(url: str, payload: dict | None, api_key: str, timeout: float) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers,
+                                     method="POST" if payload is not None else "GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - user-chosen local endpoint
+        return json.loads(response.read().decode("utf-8"))
+
+
+def list_local_models(base_url: str | None = None, api_key: str = "", timeout: float = 5.0) -> list[str]:
+    """Return model names offered by the local server. Raises RuntimeError with a how-to-fix message."""
+    base = normalise_local_base_url(base_url)
+    try:
+        payload = _local_request(f"{base}/models", None, api_key, timeout)
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Cannot reach a local AI server at {base}. Start it first, e.g. install Ollama, "
+            f"run `ollama serve`, then `ollama pull {DEFAULT_LOCAL_MODEL}`."
+        ) from exc
+    except (ValueError, OSError) as exc:
+        raise RuntimeError(f"The server at {base} did not return a valid model list: {exc}") from exc
+    return sorted(str(item.get("id")) for item in payload.get("data", []) if item.get("id"))
+
+
+def generate_local_answer(base_url: str | None, model: str | None, question: str,
+                          quant_context: str, retrieved_chunks: list[dict],
+                          conversation: list[dict] | None = None, *,
+                          api_key: str = "", timeout: float = 300.0) -> str:
+    """Ask a local, OpenAI-compatible model to explain the app's metrics and retrieved excerpts."""
+    if not question or not question.strip():
+        raise ValueError("Enter a question first.")
+    base = normalise_local_base_url(base_url)
+    model_name = (model or DEFAULT_LOCAL_MODEL).strip()
+    prompt = build_prompt(
+        question, quant_context, retrieved_chunks, conversation,
+        max_chunk_chars=LOCAL_MAX_CHUNK_CHARS, max_history_chars=LOCAL_MAX_HISTORY_CHARS,
+    )
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.25,
+        "max_tokens": LOCAL_MAX_OUTPUT_TOKENS,
+        "stream": False,
+    }
+    try:
+        result = _local_request(f"{base}/chat/completions", payload, api_key, timeout)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "ignore")[:300]
+        except Exception:  # pragma: no cover - best-effort error detail
+            pass
+        if exc.code == 404:
+            raise RuntimeError(
+                f"The local server does not have model '{model_name}'. Run `ollama pull {model_name}` "
+                f"or pick one of the installed models. {detail}"
+            ) from exc
+        raise RuntimeError(f"Local AI request failed (HTTP {exc.code}). {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Cannot reach a local AI server at {base}. Start it first (for Ollama: `ollama serve`), "
+            f"or fix the address in the AI settings."
+        ) from exc
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError("The local model timed out. Try a smaller model or ask a shorter question.") from exc
+    except ValueError as exc:
+        raise RuntimeError(f"The local server returned an unreadable response: {exc}") from exc
+
+    try:
+        answer = clean_model_output(result["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("The local server's response had no answer text. Check the model name.") from exc
+    if not answer:
+        raise RuntimeError("The local model returned an empty answer. Try again or use a larger model.")
+    return answer
+
+
+# ---------------------------------------------------------------------------
+# Optional cloud backend: Gemini
+# ---------------------------------------------------------------------------
+
+def generate_gemini_answer(api_key: str, model: str, question: str,
+                           quant_context: str,
+                           retrieved_chunks: list[dict],
+                           conversation: list[dict] | None = None) -> str:
+    """Optional cloud backend: call Gemini with metrics and locally retrieved paper excerpts."""
+    if not api_key or not api_key.strip():
+        raise ValueError("Enter your Gemini API key in the AI Assistant settings first.")
+    if not question or not question.strip():
+        raise ValueError("Enter a question first.")
+
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError(
+            "The optional Gemini SDK is not installed. Run: python -m pip install -r requirements-gemini.txt"
+        ) from exc
+
+    prompt = build_prompt(question, quant_context, retrieved_chunks, conversation)
+
     try:
         client = genai.Client(api_key=api_key.strip())
         response = client.models.generate_content(
             model=(model or "gemini-3.8-flash").strip(),
             contents=prompt,
             config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
+                system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.25,
                 max_output_tokens=1600,
             ),

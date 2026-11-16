@@ -9,11 +9,17 @@ import plotly.graph_objects as go
 from dotenv import load_dotenv
 
 from research_assistant import (
+    DEFAULT_LOCAL_BASE_URL,
+    DEFAULT_LOCAL_MODEL,
     delete_library_document,
     generate_gemini_answer,
+    generate_local_answer,
     index_pdf_bytes,
+    is_local_url,
     list_library_documents,
+    list_local_models,
     make_quant_context,
+    normalise_local_base_url,
     retrieve_relevant_chunks,
 )
 from quant_engine import (
@@ -130,7 +136,8 @@ def render_research_library() -> None:
                     st.error(f"Could not delete {document['filename']}.")
     st.caption(
         "Privacy note: the original PDFs and local search index are stored on this computer. "
-        "When you ask Gemini a question, only the relevant retrieved passages are sent to the Gemini API."
+        "With the default Local AI provider nothing leaves this computer; only if you choose the optional "
+        "Gemini provider are the relevant retrieved passages sent to Google."
     )
 
 
@@ -138,27 +145,71 @@ def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
     """Render LLM chat grounded in quantitative metrics and local paper excerpts."""
     st.subheader("AI quantitative-finance research assistant")
     st.write(
-        "Gemini explains the app's calculated metrics and can consult relevant passages "
+        "A local language model explains the app's calculated metrics and can consult relevant passages "
         "from your uploaded papers. Python remains responsible for the numerical scores; "
         "the LLM does not calculate or alter the ranking."
     )
     if is_demo:
         st.warning("The current stock universe uses synthetic demo prices. Do not ask the AI to assess these as real securities.")
 
-    env_key = os.getenv("GEMINI_API_KEY", "").strip()
-    default_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
-    with st.expander("Gemini connection settings", expanded=not bool(env_key)):
-        if env_key:
-            st.success("GEMINI_API_KEY was found in your .env / environment.")
-        else:
-            st.info("Add GEMINI_API_KEY to a local .env file, or enter it below for this session only.")
-        typed_key = st.text_input(
-            "Gemini API key", value="", type="password", key="gemini_api_key_session",
-            placeholder="Paste your API key (kept only in this Streamlit session)",
-        )
-        model_name = st.text_input("Gemini model", value=default_model, key="gemini_model_name")
-        api_key = typed_key.strip() or env_key
-        st.caption("Get an API key from Google AI Studio. Never commit your API key or .env file to GitHub.")
+    local_label = "Local AI (Ollama / LM Studio) — runs on this computer"
+    gemini_label = "Gemini (optional cloud API)"
+    env_provider = os.getenv("LLM_PROVIDER", "local").strip().lower()
+    provider = gemini_label if env_provider == "gemini" else local_label
+
+    provider = st.radio(
+        "AI provider", [local_label, gemini_label],
+        index=[local_label, gemini_label].index(provider), horizontal=True, key="llm_provider_choice",
+    )
+    use_local = provider == local_label
+
+    local_url = DEFAULT_LOCAL_BASE_URL
+    local_model = DEFAULT_LOCAL_MODEL
+    local_key = ""
+    gemini_key = ""
+    gemini_model = "gemini-3.8-flash"
+
+    if use_local:
+        local_url = os.getenv("LOCAL_LLM_BASE_URL", DEFAULT_LOCAL_BASE_URL).strip()
+        local_model = os.getenv("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL).strip()
+        with st.expander("Local AI connection settings", expanded=False):
+            local_url = st.text_input("Local server address (OpenAI-compatible)", value=local_url,
+                                      key="local_llm_url",
+                                      help="Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1")
+            local_model = st.text_input("Local model name", value=local_model, key="local_llm_model",
+                                        help="For Ollama this is the name you pulled, e.g. llama3.2 or qwen2.5:3b")
+            if st.button("Test connection", key="test_local_llm"):
+                try:
+                    models = list_local_models(local_url)
+                    if models:
+                        st.success("Connected. Installed models: " + ", ".join(models))
+                        if local_model not in models and not any(m.split(":")[0] == local_model for m in models):
+                            st.warning(f"'{local_model}' is not in that list; choose one of the installed models.")
+                    else:
+                        st.warning("Connected, but no models are installed yet. For Ollama run: ollama pull " + DEFAULT_LOCAL_MODEL)
+                except RuntimeError as exc:
+                    st.error(str(exc))
+            if is_local_url(local_url):
+                st.caption("🔒 This address is on your computer: questions, metrics and paper passages are not sent to the internet.")
+            else:
+                st.warning("This address is NOT on your computer. Your question, metrics and paper passages will be sent to that server.")
+            st.caption("Quick start: install Ollama, then run `ollama pull llama3.2` and keep `ollama serve` running.")
+    else:
+        env_key = os.getenv("GEMINI_API_KEY", "").strip()
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+        with st.expander("Gemini connection settings", expanded=not bool(env_key)):
+            st.warning("Cloud provider: your question, metric summary and selected paper passages are sent to Google's Gemini API.")
+            if env_key:
+                st.success("GEMINI_API_KEY was found in your .env / environment.")
+            else:
+                st.info("Add GEMINI_API_KEY to a local .env file, or enter it below for this session only.")
+            typed_key = st.text_input(
+                "Gemini API key", value="", type="password", key="gemini_api_key_session",
+                placeholder="Paste your API key (kept only in this Streamlit session)",
+            )
+            gemini_model = st.text_input("Gemini model", value=gemini_model, key="gemini_model_name")
+            gemini_key = typed_key.strip() or env_key
+            st.caption("Needs the optional SDK: python -m pip install -r requirements-gemini.txt. Never commit your API key or .env file.")
 
     if "ai_research_messages" not in st.session_state:
         st.session_state["ai_research_messages"] = []
@@ -177,22 +228,26 @@ def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
     question = st.chat_input("Ask about the stock ranking, risk metrics, strategy, or uploaded papers…", key="quant_ai_chat_input")
     if question:
         st.session_state["ai_research_messages"].append({"role": "user", "content": question})
-        if not api_key:
-            answer = "Please configure a Gemini API key in the settings above. You can create one in Google AI Studio."
+        if not use_local and not gemini_key:
+            answer = "Please configure a Gemini API key in the settings above, or switch to the Local AI provider."
             st.session_state["ai_research_messages"].append({"role": "assistant", "content": answer})
             st.rerun()
-        with st.spinner("Retrieving research passages and asking Gemini to analyse the evidence…"):
+        spinner = ("Retrieving research passages and asking the local model… (small local models can take a minute)"
+                   if use_local else "Retrieving research passages and asking Gemini to analyse the evidence…")
+        with st.spinner(spinner):
             try:
                 retrieved = retrieve_relevant_chunks(question, top_k=5)
                 previous = st.session_state["ai_research_messages"][:-1]
-                answer = generate_gemini_answer(
-                    api_key=api_key,
-                    model=model_name,
-                    question=question,
-                    quant_context=quant_context,
-                    retrieved_chunks=retrieved,
-                    conversation=previous,
-                )
+                if use_local:
+                    answer = generate_local_answer(
+                        base_url=local_url, model=local_model, question=question,
+                        quant_context=quant_context, retrieved_chunks=retrieved, conversation=previous,
+                    )
+                else:
+                    answer = generate_gemini_answer(
+                        api_key=gemini_key, model=gemini_model, question=question,
+                        quant_context=quant_context, retrieved_chunks=retrieved, conversation=previous,
+                    )
                 sources = [
                     {"source": item.get("source", "Unknown"),
                      "page": item.get("page", "?"),
@@ -203,8 +258,9 @@ def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
                     {"role": "assistant", "content": answer, "sources": sources}
                 )
             except Exception as exc:
+                name = "local AI" if use_local else "Gemini"
                 st.session_state["ai_research_messages"].append(
-                    {"role": "assistant", "content": f"I couldn't complete the Gemini request. {exc}"}
+                    {"role": "assistant", "content": f"I couldn't complete the {name} request. {exc}"}
                 )
         st.rerun()
 
@@ -454,9 +510,10 @@ with method_tab:
 
 - The quantitative engine calculates all numerical indicators, factor percentiles, composite scores, and backtest results in Python.
 - PDF papers are stored locally, parsed into page-labelled text chunks, and indexed with TF-IDF. Retrieval is local and does not require an embedding API.
-- When a user asks a question, the app retrieves up to five relevant paper passages and sends those passages, the user's question, recent chat context, and a compact summary of the currently displayed stock metrics to the Gemini API using the official Google Gen AI Python SDK.
-- Gemini explains the supplied figures and research excerpts. It does not fetch prices, recalculate the score, or change the ranking.
-- The API key is read from a local `.env` file or entered for the current session. Do not commit API keys or `.env` to GitHub.
+- When a user asks a question, the app retrieves up to five relevant paper passages and passes those passages, the user's question, recent chat context, and a compact summary of the currently displayed stock metrics to the selected language model.
+- By default that model is a **local AI** (Ollama, LM Studio or any OpenAI-compatible local server) running on this computer, so nothing is sent to the internet. Gemini is an optional cloud provider that needs an API key and the optional SDK.
+- The language model explains the supplied figures and research excerpts. It does not fetch prices, recalculate the score, or change the ranking.
+- Settings come from a local `.env` file or the AI settings panel. Do not commit API keys or `.env` to GitHub.
 
 **Backtest assumptions**
 
