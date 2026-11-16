@@ -223,7 +223,8 @@ def _percentile_score(values: pd.Series, higher_is_better: bool = True) -> pd.Se
     if valid.nunique() == 1:
         result.loc[valid.index] = 50.0
     else:
-        ranks = valid.rank(pct=True, method="average", ascending=not higher_is_better)
+        # ascending=True gives the largest value the highest percentile, which is what "higher is better" means.
+        ranks = valid.rank(pct=True, method="average", ascending=higher_is_better)
         result.loc[valid.index] = ranks * 100
     return result
 
