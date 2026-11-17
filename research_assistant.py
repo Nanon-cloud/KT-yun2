@@ -1,8 +1,8 @@
-"""Local PDF knowledge retrieval and Gemini LLM explanation layer.
+"""Local PDF knowledge retrieval and Ollama LLM explanation layer.
 
-PDFs and the TF-IDF index remain on disk in ./data. Only the question, selected
-quantitative metrics, and a small set of retrieved text excerpts are sent to
-Gemini when the user asks for an AI explanation.
+PDFs and the TF-IDF index remain on disk in ./data. The question, selected
+quantitative metrics, and retrieved text excerpts are sent to the locally
+running Ollama service when the user asks for an AI explanation.
 """
 from __future__ import annotations
 
@@ -254,46 +254,52 @@ def make_quant_context(scores, source_note: str, start_date, end_date,
     return "\n".join(context)
 
 
-def generate_gemini_answer(api_key: str, model: str, question: str,
-                           quant_context: str,
-                           retrieved_chunks: list[dict],
-                           conversation: list[dict] | None = None) -> str:
-    """Call Gemini with quantitative metrics and locally retrieved paper excerpts."""
-    if not api_key or not api_key.strip():
-        raise ValueError("Enter your Gemini API key in the AI Assistant settings first.")
+
+def generate_ollama_answer(
+    model: str,
+    question: str,
+    quant_context: str,
+    retrieved_chunks: list[dict],
+    conversation: list[dict] | None = None,
+) -> str:
+    """Call a locally running Ollama model with quantitative results and research excerpts."""
+
+    import json
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
     if not question or not question.strip():
         raise ValueError("Enter a question first.")
 
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError as exc:
-        raise RuntimeError("Gemini SDK is missing. Run: python -m pip install -r requirements.txt") from exc
+    if not model or not model.strip():
+        raise ValueError("Enter a local Ollama model name, such as qwen3:8b.")
 
     if retrieved_chunks:
         paper_context = "\n\n".join(
-            f"[SOURCE: {c.get('source', 'Unknown document')} | PAGE: {c.get('page', '?')} | RETRIEVAL SCORE: {c.get('similarity', 0):.3f}]\n{c['text']}"
+            f"[SOURCE: {c.get('source', 'Unknown document')} | "
+            f"PAGE: {c.get('page', '?')} | "
+            f"RETRIEVAL SCORE: {c.get('similarity', 0):.3f}]\n{c['text']}"
             for c in retrieved_chunks
         )
     else:
-        paper_context = "No relevant excerpts were retrieved from the uploaded research-paper library. Do not claim to have consulted any paper."
-
-    recent_history = []
-    for item in (conversation or [])[-6:]:
-        role = "User" if item.get("role") == "user" else "Assistant"
-        recent_history.append(f"{role}: {item.get('content', '')}")
-    history_text = "\n".join(recent_history) if recent_history else "No prior conversation."
+        paper_context = (
+            "No relevant excerpts were retrieved from the uploaded research-paper "
+            "library. Do not claim to have consulted any paper."
+        )
 
     system_instruction = (
-        "You are a cautious quantitative-finance research assistant. You explain calculations and research, "
-        "not provide personalized financial advice. Never claim that a score guarantees returns or that a stock "
-        "is certain to rise. Do not invent market data, calculations, facts, or paper citations. Distinguish "
-        "quantitative metrics computed by the application from claims in retrieved research excerpts and from "
-        "your own general explanation. If the data is synthetic, clearly say so. If context is insufficient, "
-        "state what is missing. Discuss limitations such as overfitting, transaction costs, survivorship bias, "
-        "look-ahead bias, data quality, and the fact that historical performance does not guarantee future results. "
-        "When using a retrieved passage, cite it inline as [Document filename, p. X]. Do not create a citation "
-        "unless that source appears in the supplied excerpts."
+        "You are a cautious quantitative-finance research assistant. "
+        "You explain calculations and research, not provide personalized financial advice. "
+        "Never claim that a score guarantees returns or that a stock is certain to rise. "
+        "Do not invent market data, calculations, facts, or paper citations. "
+        "Distinguish quantitative metrics computed by the application from claims in "
+        "retrieved research excerpts and from your own general explanation. "
+        "If the data is synthetic, clearly say so. If context is insufficient, state "
+        "what is missing. Discuss limitations such as overfitting, transaction costs, "
+        "survivorship bias, look-ahead bias, data quality, and the fact that historical "
+        "performance does not guarantee future results. "
+        "When using a retrieved passage, cite it inline as [Document filename, p. X]. "
+        "Do not create a citation unless that source appears in the supplied excerpts."
     )
 
     prompt = f"""Answer the user's question using the evidence below.
@@ -304,9 +310,6 @@ CURRENT QUANTITATIVE APPLICATION RESULTS:
 LOCALLY RETRIEVED RESEARCH-PAPER EXCERPTS:
 {paper_context}
 
-RECENT CONVERSATION:
-{history_text}
-
 USER QUESTION:
 {question}
 
@@ -316,24 +319,66 @@ Suggested response structure where appropriate:
 3. Relevant research-paper evidence with page citations.
 4. Key risks, uncertainty, and what additional analysis is needed.
 
-If the selected universe uses demo data, do not make claims about real stocks. Do not issue an unconditional buy/sell instruction."""
+If the selected universe uses demo data, do not make claims about real stocks.
+Do not issue an unconditional buy/sell instruction."""
+
+    messages = [
+        {"role": "system", "content": system_instruction}
+    ]
+
+    for item in (conversation or [])[-6:]:
+        role = item.get("role")
+        if role in ("user", "assistant"):
+            messages.append({
+                "role": role,
+                "content": item.get("content", ""),
+            })
+
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model.strip(),
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": 0.25,
+            "num_predict": 1600,
+        },
+    }
+
+    request = Request(
+        "http://127.0.0.1:11434/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
 
     try:
-        client = genai.Client(api_key=api_key.strip())
-        response = client.models.generate_content(
-            model=(model or "gemini-3.8-flash").strip(),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.25,
-                max_output_tokens=1600,
-            ),
-        )
-    except Exception as exc:
-        message = str(exc).replace(api_key.strip(), "[API KEY REDACTED]")
-        raise RuntimeError(f"Gemini request failed: {message[:700]}") from exc
+        with urlopen(request, timeout=180) as response:
+            result = json.loads(response.read().decode("utf-8"))
 
-    answer = getattr(response, "text", None)
-    if not answer:
-        raise RuntimeError("Gemini returned an empty response. Check the model name, API key, or safety response.")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Ollama returned HTTP {exc.code}: {detail[:500]}"
+        ) from exc
+
+    except URLError as exc:
+        raise RuntimeError(
+            "Cannot connect to Ollama at http://127.0.0.1:11434. "
+            "Make sure the Ollama application is running."
+        ) from exc
+
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Ollama took too long to respond. Try again or use a smaller model."
+        ) from exc
+
+    answer = result.get("message", {}).get("content", "")
+
+    if not answer.strip():
+        raise RuntimeError(
+            "Ollama returned an empty response. Check the model and try again."
+        )
+
     return answer.strip()

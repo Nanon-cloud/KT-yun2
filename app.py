@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from research_assistant import (
     delete_library_document,
-    generate_gemini_answer,
+    generate_ollama_answer,
     index_pdf_bytes,
     list_library_documents,
     make_quant_context,
@@ -35,17 +35,211 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
 st.markdown("""
 <style>
-    .stApp { background: #f7f9fc; }
-    [data-testid="stSidebar"] { background: #101b2d; }
-    [data-testid="stSidebar"] * { color: #edf3fa !important; }
-    .hero { padding: 1.25rem 1.5rem; border-radius: 18px; background: linear-gradient(120deg,#10223c,#174d62); color: white; margin-bottom: 1rem; }
-    .hero h1 { color: white; font-size: 2rem; margin: 0; }
-    .hero p { color: #d6e7f2; margin: .45rem 0 0 0; }
-    .small-note { color: #526174; font-size: .88rem; }
-    div[data-testid="stMetric"] { background: white; border: 1px solid #e4eaf1; padding: 12px 14px; border-radius: 12px; }
-    div[data-testid="stDataFrame"] { border: 1px solid #e4eaf1; border-radius: 12px; }
+    /* Main application */
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {
+        background-color: #f4f7fb;
+        color: #172033;
+    }
+
+    /* Main text */
+    [data-testid="stMain"] h1,
+    [data-testid="stMain"] h2,
+    [data-testid="stMain"] h3,
+    [data-testid="stMain"] h4,
+    [data-testid="stMain"] p,
+    [data-testid="stMain"] li,
+    [data-testid="stMain"] label,
+    [data-testid="stMain"] .stMarkdown,
+    [data-testid="stMain"] [data-testid="stCaptionContainer"] {
+        color: #172033;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #101b2d;
+    }
+
+    [data-testid="stSidebar"] * {
+        color: #edf3fa;
+    }
+
+    /* Header banner */
+    .hero {
+        padding: 1.5rem;
+        border-radius: 18px;
+        background: linear-gradient(120deg, #10223c, #174d62);
+        color: white;
+        margin-bottom: 1rem;
+    }
+
+    .hero h1 {
+        color: white !important;
+        font-size: 2rem;
+        margin: 0;
+    }
+
+    .hero p {
+        color: #d6e7f2 !important;
+        margin: .45rem 0 0 0;
+    }
+
+    .small-note {
+        color: #526174;
+        font-size: .88rem;
+    }
+
+    /* Metric cards */
+    div[data-testid="stMetric"] {
+        background: white;
+        border: 1px solid #dce4ee;
+        padding: 14px;
+        border-radius: 12px;
+    }
+
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #172033 !important;
+    }
+
+    /* Tables */
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #dce4ee;
+        border-radius: 12px;
+        background: white;
+    }
+
+    /* Tabs */
+    [data-testid="stTabs"] button {
+        color: #334155 !important;
+    }
+
+    [data-testid="stTabs"] button[aria-selected="true"] {
+        color: #2563eb !important;
+    }
+
+    /* Expanders */
+    [data-testid="stExpander"] {
+        background: white;
+        border: 1px solid #dce4ee;
+        border-radius: 10px;
+    }
+
+    [data-testid="stExpander"] summary {
+        color: #172033 !important;
+    }
+
+    /* Text inputs and text areas */
+    [data-testid="stMain"] input,
+    [data-testid="stMain"] textarea {
+        background-color: white !important;
+        color: #172033 !important;
+        border: 1px solid #cbd5e1 !important;
+    }
+
+    /* Chat interface */
+    [data-testid="stChatMessage"] {
+        background-color: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+    }
+
+    [data-testid="stChatMessage"] p {
+        color: #172033 !important;
+    }
+
+    /* Buttons */
+    [data-testid="stMain"] .stButton button {
+        background-color: #1d4ed8;
+        color: white !important;
+        border-radius: 8px;
+        border: none;
+    }
+
+    [data-testid="stMain"] .stButton button:hover {
+        background-color: #1e40af;
+        color: white !important;
+    }
+
+    /* Notification boxes */
+    [data-testid="stAlert"] {
+        background-color: #eaf2ff !important;
+        border: 1px solid #bfdbfe !important;
+        border-radius: 10px !important;
+    }
+
+    [data-testid="stAlert"] p,
+    [data-testid="stAlert"] span,
+    [data-testid="stAlert"] div {
+        color: #17365d !important;
+    }
+
+    /* AI chat input container */
+    [data-testid="stChatInput"] {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 12px !important;
+    }
+
+    /* AI chat input text */
+    [data-testid="stChatInput"] textarea {
+        background-color: #ffffff !important;
+        color: #172033 !important;
+        -webkit-text-fill-color: #172033 !important;
+    }
+
+    /* AI chat placeholder */
+    [data-testid="stChatInput"] textarea::placeholder {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        opacity: 1 !important;
+    }
+
+    /* Chat submit button */
+    [data-testid="stChatInput"] button {
+        background-color: #2563eb !important;
+        color: #ffffff !important;
+    }
+
+    [data-testid="stChatInput"] button svg {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+    }
+
+    /* Sidebar input fields: dark text on white backgrounds */
+    [data-testid="stSidebar"] [data-baseweb="input"] input,
+    [data-testid="stSidebar"] [data-baseweb="textarea"] textarea,
+    [data-testid="stSidebar"] [data-baseweb="select"] *,
+    [data-testid="stSidebar"] input,
+    [data-testid="stSidebar"] textarea {
+        color: #172033 !important;
+        -webkit-text-fill-color: #172033 !important;
+        background-color: #ffffff;
+    }
+
+    /* Sidebar input placeholders */
+    [data-testid="stSidebar"] input::placeholder,
+    [data-testid="stSidebar"] textarea::placeholder {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        opacity: 1 !important;
+    }
+
+    /* Sidebar dropdown menus */
+    [data-testid="stSidebar"] [role="listbox"],
+    [data-testid="stSidebar"] [role="option"] {
+        background-color: #ffffff !important;
+        color: #172033 !important;
+    }
+
+    [data-testid="stSidebar"] [role="option"] * {
+        color: #172033 !important;
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -130,35 +324,45 @@ def render_research_library() -> None:
                     st.error(f"Could not delete {document['filename']}.")
     st.caption(
         "Privacy note: the original PDFs and local search index are stored on this computer. "
-        "When you ask Gemini a question, only the relevant retrieved passages are sent to the Gemini API."
+        "When you ask a question, relevant retrieved passages are sent to the Ollama model running locally on this computer."
     )
+
 
 
 def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
-    """Render LLM chat grounded in quantitative metrics and local paper excerpts."""
-    st.subheader("AI quantitative-finance research assistant")
-    st.write(
-        "Gemini explains the app's calculated metrics and can consult relevant passages "
-        "from your uploaded papers. Python remains responsible for the numerical scores; "
-        "the LLM does not calculate or alter the ranking."
-    )
-    if is_demo:
-        st.warning("The current stock universe uses synthetic demo prices. Do not ask the AI to assess these as real securities.")
+    """Render local Ollama chat grounded in quantitative metrics and research papers."""
 
-    env_key = os.getenv("GEMINI_API_KEY", "").strip()
-    default_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
-    with st.expander("Gemini connection settings", expanded=not bool(env_key)):
-        if env_key:
-            st.success("GEMINI_API_KEY was found in your .env / environment.")
-        else:
-            st.info("Add GEMINI_API_KEY to a local .env file, or enter it below for this session only.")
-        typed_key = st.text_input(
-            "Gemini API key", value="", type="password", key="gemini_api_key_session",
-            placeholder="Paste your API key (kept only in this Streamlit session)",
+    st.subheader("AI quantitative-finance research assistant")
+
+    st.write(
+        "Qwen3 runs locally through Ollama. It explains the app's calculated metrics "
+        "and can consult relevant passages from your uploaded research papers. "
+        "Python remains responsible for numerical scores; the LLM does not calculate "
+        "or alter the ranking."
+    )
+
+    st.info(
+        "Local AI mode: questions, quantitative context, and retrieved research "
+        "passages are sent to Ollama running on this computer."
+    )
+
+    if is_demo:
+        st.warning(
+            "The current stock universe uses synthetic demo prices. "
+            "Do not ask the AI to assess these as real securities."
         )
-        model_name = st.text_input("Gemini model", value=default_model, key="gemini_model_name")
-        api_key = typed_key.strip() or env_key
-        st.caption("Get an API key from Google AI Studio. Never commit your API key or .env file to GitHub.")
+
+    default_model = "qwen3:8b"
+
+    with st.expander("Local AI connection settings", expanded=False):
+        model_name = st.text_input(
+            "Ollama model",
+            value=default_model,
+            key="ollama_model_name",
+        )
+        st.caption(
+            "Ollama must be running locally. Default model: qwen3:8b."
+        )
 
     if "ai_research_messages" not in st.session_state:
         st.session_state["ai_research_messages"] = []
@@ -166,6 +370,7 @@ def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
     for message in st.session_state["ai_research_messages"]:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
             if message.get("sources"):
                 with st.expander("Research passages retrieved"):
                     for source in message["sources"]:
@@ -174,45 +379,69 @@ def render_ai_assistant(quant_context: str, is_demo: bool) -> None:
                             f"(retrieval similarity: {source['similarity']:.2f})"
                         )
 
-    question = st.chat_input("Ask about the stock ranking, risk metrics, strategy, or uploaded papers…", key="quant_ai_chat_input")
+    question = st.chat_input(
+        "Ask about the stock ranking, risk metrics, strategy, or uploaded papers…",
+        key="quant_ai_chat_input",
+    )
+
     if question:
-        st.session_state["ai_research_messages"].append({"role": "user", "content": question})
-        if not api_key:
-            answer = "Please configure a Gemini API key in the settings above. You can create one in Google AI Studio."
-            st.session_state["ai_research_messages"].append({"role": "assistant", "content": answer})
-            st.rerun()
-        with st.spinner("Retrieving research passages and asking Gemini to analyse the evidence…"):
+        st.session_state["ai_research_messages"].append(
+            {"role": "user", "content": question}
+        )
+
+        with st.spinner(
+            "Retrieving research passages and asking your local AI model..."
+        ):
             try:
                 retrieved = retrieve_relevant_chunks(question, top_k=5)
+
                 previous = st.session_state["ai_research_messages"][:-1]
-                answer = generate_gemini_answer(
-                    api_key=api_key,
-                    model=model_name,
+
+                answer = generate_ollama_answer(
+                    model=model_name.strip(),
                     question=question,
                     quant_context=quant_context,
                     retrieved_chunks=retrieved,
                     conversation=previous,
                 )
+
                 sources = [
-                    {"source": item.get("source", "Unknown"),
-                     "page": item.get("page", "?"),
-                     "similarity": item.get("similarity", 0.0)}
+                    {
+                        "source": item.get("source", "Unknown"),
+                        "page": item.get("page", "?"),
+                        "similarity": item.get("similarity", 0.0),
+                    }
                     for item in retrieved
                 ]
+
                 st.session_state["ai_research_messages"].append(
-                    {"role": "assistant", "content": answer, "sources": sources}
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources,
+                    }
                 )
+
             except Exception as exc:
                 st.session_state["ai_research_messages"].append(
-                    {"role": "assistant", "content": f"I couldn't complete the Gemini request. {exc}"}
+                    {
+                        "role": "assistant",
+                        "content": f"I couldn't complete the Ollama request. {exc}",
+                    }
                 )
+
         st.rerun()
 
     col1, col2 = st.columns([1, 5])
+
     if col1.button("Clear chat", key="clear_ai_research_chat"):
         st.session_state["ai_research_messages"] = []
         st.rerun()
-    col2.caption("Suggested question: Compare the two highest-ranked stocks and explain the risk/return trade-offs using the quantitative results and research papers.")
+
+    col2.caption(
+        "Suggested question: Compare the two highest-ranked stocks and explain "
+        "the risk/return trade-offs using the quantitative results and research papers."
+    )
 
 
 st.markdown("""
@@ -454,8 +683,8 @@ with method_tab:
 
 - The quantitative engine calculates all numerical indicators, factor percentiles, composite scores, and backtest results in Python.
 - PDF papers are stored locally, parsed into page-labelled text chunks, and indexed with TF-IDF. Retrieval is local and does not require an embedding API.
-- When a user asks a question, the app retrieves up to five relevant paper passages and sends those passages, the user's question, recent chat context, and a compact summary of the currently displayed stock metrics to the Gemini API using the official Google Gen AI Python SDK.
-- Gemini explains the supplied figures and research excerpts. It does not fetch prices, recalculate the score, or change the ranking.
+- When a user asks a question, the app retrieves up to five relevant paper passages and sends those passages, the user's question, recent chat context, and a compact summary of the currently displayed stock metrics to the locally running Ollama API.
+- Qwen3 explains the supplied figures and research excerpts. It does not fetch prices, recalculate the score, or change the ranking.
 - The API key is read from a local `.env` file or entered for the current session. Do not commit API keys or `.env` to GitHub.
 
 **Backtest assumptions**
